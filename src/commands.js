@@ -5,7 +5,8 @@ import { createWallet, importWallet, saveWallet, getSigner } from './wallet.js';
 import { getAdapter } from './chains/index.js';
 import { buy, sell, getQuoteForUser, getSlippage } from './trading.js';
 import { addTarget, removeTarget, listTargets } from './services/copytrader.js';
-import { setSniperUser, getSniperUser, setSniperEnabled, getSniperState } from './services/sniper.js';
+import { setSniperUser, getSniperUser, setSniperEnabled } from './services/sniper.js';
+import { getSniperState } from './db/store.js';
 import { addSignalSource, removeSignalSource, listSignalSources } from './services/signals.js';
 
 function resolveChain(ctx, arg) {
