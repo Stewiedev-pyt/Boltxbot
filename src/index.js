@@ -6,17 +6,28 @@ import { startLimitEngine } from './services/limits.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
-async function launchWithRetry(bot, tries = 5) {
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/* Telegraf's bot.launch() never resolves (the long-poll loop runs forever), so we
+   cannot gate on it. Instead: retry the connection phase (getMe + deleteWebhook),
+   then kick off long polling in the background. Polling handles transient network
+   errors internally and only rejects on fatal errors (401/409). */
+async function startBot(bot, tries = 6) {
   for (let i = 0; i < tries; i++) {
     try {
-      await bot.launch();
+      bot.botInfo = await bot.telegram.getMe();
+      await bot.telegram.deleteWebhook();
+      bot.startPolling().catch((err) => logger.error('Polling stopped', { error: err.message }));
+      logger.info('Bot connected', { username: bot.botInfo.username });
       return;
     } catch (err) {
-      logger.warn('Bot launch failed, retrying', { attempt: i + 1, error: err.message });
-      await new Promise((r) => setTimeout(r, 3000 * (i + 1)));
+      logger.warn('Bot connection failed, retrying', { attempt: i + 1, error: err.message });
+      await sleep(5000 * (i + 1));
     }
   }
-  throw new Error('Bot launch failed after retries');
+  throw new Error('Bot connection failed after retries');
 }
 
 async function main() {
@@ -24,7 +35,7 @@ async function main() {
   logger.info('DB loaded');
 
   const bot = createBot();
-  await launchWithRetry(bot);
+  await startBot(bot);
 
   startCopytrader().catch((err) => logger.error('Copytrader failed to start', { error: err.message }));
   startSniper().catch((err) => logger.error('Sniper failed to start', { error: err.message }));

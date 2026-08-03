@@ -1,4 +1,8 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+const LOG_FILE = path.resolve(process.cwd(), 'bot.log');
 
 function ts() {
   return new Date().toISOString();
@@ -7,9 +11,14 @@ function ts() {
 function write(level, msg, meta) {
   const threshold = LEVELS[process.env.LOG_LEVEL] ?? LEVELS.info;
   if (LEVELS[level] < threshold) return;
-  const line = `${ts()} [${level.toUpperCase()}] ${msg}${meta ? ' ' + JSON.stringify(meta) : ''}`;
-  if (level === 'error') console.error(line);
-  else console.log(line);
+  const line = `${ts()} [${level.toUpperCase()}] ${msg}${meta ? ' ' + JSON.stringify(meta) : ''}\n`;
+  try {
+    fs.appendFileSync(LOG_FILE, line);
+  } catch {
+    // never let logging break the bot
+  }
+  if (level === 'error') console.error(line.trimEnd());
+  else console.log(line.trimEnd());
 }
 
 export const logger = {
