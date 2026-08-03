@@ -2,7 +2,15 @@ import bs58 from 'bs58';
 import { Keypair } from '@solana/web3.js';
 import { Wallet as EvmWallet } from 'ethers';
 import { getAdapter } from './chains/index.js';
-import { getOrCreateUser, setWallet, encryptSecret, decryptSecret } from './db/store.js';
+import {
+  getOrCreateUser,
+  addWallet,
+  getWallet,
+  getWallets,
+  setActiveWallet,
+  encryptSecret,
+  decryptSecret,
+} from './db/store.js';
 
 function newSolanaWallet() {
   const kp = Keypair.generate();
@@ -58,15 +66,20 @@ export function importWallet(chainId, secret) {
 }
 
 export function saveWallet(tgId, chainId, wallet) {
-  const user = getOrCreateUser(tgId);
+  getOrCreateUser(tgId);
   const stored = {
     address: wallet.address,
     encKey: encryptSecret(wallet.secretB64),
-    createdAt: Date.now(),
   };
-  user.wallets[chainId] = stored;
-  setWallet(tgId, chainId, stored);
-  return stored;
+  return addWallet(tgId, chainId, stored);
+}
+
+export function switchWallet(tgId, chainId, id) {
+  return setActiveWallet(tgId, chainId, id);
+}
+
+export function listWallets(tgId, chainId) {
+  return getWallets(tgId, chainId);
 }
 
 function toSigner(chainId, stored) {
@@ -81,8 +94,7 @@ function toSigner(chainId, stored) {
 }
 
 export function getSigner(tgId, chainId) {
-  const user = getOrCreateUser(tgId);
-  const stored = user.wallets[chainId];
+  const stored = getWallet(tgId, chainId);
   if (!stored) return null;
   return { stored, signer: toSigner(chainId, stored) };
 }

@@ -1,8 +1,16 @@
 import {
   Connection,
+  Keypair,
   PublicKey,
+  SystemProgram,
+  Transaction,
   VersionedTransaction,
 } from '@solana/web3.js';
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+  createTransferInstruction,
+} from '@solana/spl-token';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -89,6 +97,19 @@ export function makeSolanaAdapter() {
     return info;
   }
 
+  /* Mint authority check for the safety scanner.
+     Returns true when mint authority is revoked (cannot mint more). */
+  async function isMintAuthorityRevoked(mint) {
+    try {
+      const info = await connection.getParsedAccountInfo(new PublicKey(normalizeAddress(mint)));
+      const data = info.value?.data;
+      if (data && data.parsed?.info?.mintAuthority === undefined) return true;
+      return data?.parsed?.info?.mintAuthority === null;
+    } catch {
+      return null;
+    }
+  }
+
   async function getNativeBalance(wallet) {
     return (await connection.getBalance(wallet.publicKey)).toString();
   }
@@ -127,7 +148,6 @@ export function makeSolanaAdapter() {
     const slippageBps = Math.round((slippagePercent || 3) * 100);
     const url = `quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInRaw}&slippageBps=${slippageBps}&onlyDirectRoutes=true`;
     const res = await apiFetch(cfg, url);
-    if (!res.ok) throw new Error(`Jupiter quote failed: ${res.status} ${await res.text()}`);
     const q = await res.json();
     if (!q.routePlan || q.routePlan.length === 0) throw new Error('No route found');
     const inInfo = await getTokenInfo(inputMint);
@@ -150,6 +170,14 @@ export function makeSolanaAdapter() {
     };
   }
 
+  /* Price of a token expressed in SOL per token. */
+  async function getPrice(token) {
+    const mint = normalizeAddress(token);
+    const info = await getTokenInfo(mint);
+    const q = await getQuote({ input: mint, output: SOL_MINT, amountInRaw: (10n ** BigInt(info.decimals)).toString() });
+    return Number(q.amountOutRaw) / 1e9;
+  }
+
   async function executeSwap({ wallet, quote, slippagePercent }) {
     const swapPayload = {
       quoteResponse: quote.raw,
@@ -164,7 +192,6 @@ export function makeSolanaAdapter() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(swapPayload),
     });
-    if (!res.ok) throw new Error(`Jupiter swap failed: ${res.status} ${await res.text()}`);
     const { swapTransaction } = await res.json();
     const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
     tx.sign([wallet.keypair]);
@@ -173,6 +200,44 @@ export function makeSolanaAdapter() {
       maxRetries: 3,
     });
     logger.info('Solana swap sent', { sig });
+    return { txid: sig };
+  }
+
+  async function withdrawNative(wallet, to, amountRaw) {
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: wallet.publicKey,
+        toPubkey: new PublicKey(to),
+        lamports: BigInt(amountRaw),
+      })
+    );
+    tx.feePayer = wallet.publicKey;
+    tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+    tx.sign(wallet.keypair);
+    const sig = await connection.sendTransaction(tx, { skipPreflight: true, maxRetries: 3 });
+    logger.info('Solana withdraw sent', { sig, to, amountRaw });
+    return { txid: sig };
+  }
+
+  async function withdrawToken(wallet, to, token, amountRaw) {
+    const mint = normalizeAddress(token);
+    const fromAta = await getAssociatedTokenAddress(new PublicKey(mint), wallet.publicKey);
+    const toAta = await getAssociatedTokenAddress(new PublicKey(mint), new PublicKey(to));
+    const tx = new Transaction();
+    const toAccount = await connection.getAccountInfo(toAta).catch(() => null);
+    if (!toAccount || toAccount.data.length === 0) {
+      tx.add(
+        createAssociatedTokenAccountInstruction(wallet.publicKey, toAta, new PublicKey(to), new PublicKey(mint))
+      );
+    }
+    tx.add(
+      createTransferInstruction(fromAta, toAta, wallet.publicKey, BigInt(amountRaw))
+    );
+    tx.feePayer = wallet.publicKey;
+    tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+    tx.sign(wallet.keypair);
+    const sig = await connection.sendTransaction(tx, { skipPreflight: true, maxRetries: 3 });
+    logger.info('Solana token withdraw sent', { sig, to, token: mint, amountRaw });
     return { txid: sig };
   }
 
@@ -187,7 +252,11 @@ export function makeSolanaAdapter() {
     getTokenBalance,
     getBalances,
     getQuote,
+    getPrice,
     executeSwap,
+    withdrawNative,
+    withdrawToken,
+    isMintAuthorityRevoked,
     needsApprove: false,
   };
 }

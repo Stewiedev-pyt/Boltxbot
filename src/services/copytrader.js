@@ -6,58 +6,104 @@ import { logger } from '../logger.js';
 import { config } from '../config.js';
 
 const snapshots = new Map();
+const evmCursors = new Map();
+const recentTx = new Map();
+
+const TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
 function canonical(target) {
   return `${target.chain}:${target.address.toLowerCase()}`;
 }
 
-async function snapshot(chainId, address) {
+function topic(address) {
+  return `0x${address.toLowerCase().replace(/^0x/, '').padStart(64, '0')}`;
+}
+
+/* ---------- Solana: token-balance delta tracking ---------- */
+
+async function solanaSnapshot(chainId, address) {
   const adapter = getAdapter(chainId);
-  const signer = chainId === 'solana'
-    ? { publicKey: new (await import('@solana/web3.js')).PublicKey(address) }
-    : { address };
-  const balances = await adapter.getBalances(signer);
+  const { PublicKey } = await import('@solana/web3.js');
+  const balances = await adapter.getBalances({ publicKey: new PublicKey(address) });
   return balances.reduce((acc, b) => {
-    if (b.token && b.token !== adapter.nativeSymbol) acc[b.token.toLowerCase()] = b.raw;
+    if (b.token) acc[b.token.toLowerCase()] = b.raw;
     return acc;
   }, {});
 }
 
-async function diff(chainId, address, previous) {
-  const current = await snapshot(chainId, address);
-  const changes = [];
-  const tokens = new Set([...Object.keys(previous), ...Object.keys(current)]);
-  for (const token of tokens) {
-    const prev = BigInt(previous[token] || 0);
-    const now = BigInt(current[token] || 0);
-    if (now > prev) {
-      changes.push({ token, delta: (now - prev).toString(), dir: 'buy' });
-    } else if (now < prev) {
-      changes.push({ token, delta: (prev - now).toString(), dir: 'sell' });
-    }
+/* ---------- EVM: Transfer event scanning ---------- */
+
+async function evmEvents(chainId, address) {
+  const adapter = getAdapter(chainId);
+  const provider = adapter.provider;
+  const key = `${chainId}:${address.toLowerCase()}`;
+  const current = await provider.getBlockNumber();
+
+  const prev = evmCursors.get(key) || current - 1;
+  const fromBlock = Math.max(prev + 1, current - 400);
+  const toBlock = current;
+  evmCursors.set(key, current);
+  if (fromBlock > toBlock) return [];
+
+  const toTopic = topic(address);
+  const [buys, sells] = await Promise.all([
+    provider.getLogs({ fromBlock, toBlock, topics: [TRANSFER_SIG, null, toTopic] }),
+    provider.getLogs({ fromBlock, toBlock, topics: [TRANSFER_SIG, toTopic] }),
+  ]);
+
+  const seen = new Set(recentTx.get(key) || []);
+  const events = [];
+  for (const log of [...buys, ...sells]) {
+    const isBuy = buys.includes(log);
+    if (seen.has(log.transactionHash)) continue;
+    seen.add(log.transactionHash);
+    events.push({ token: log.address, dir: isBuy ? 'buy' : 'sell', txid: log.transactionHash, block: log.blockNumber });
   }
-  return { current, changes };
+  recentTx.set(key, [...seen].slice(-200));
+  return events;
 }
 
-async function handleChange(target, change) {
+/* ---------- dispatch ---------- */
+
+async function processEvent(target, event) {
   const tgId = String(target.tgId);
-  const signerCtx = getSigner(tgId, target.chain);
-  if (!signerCtx) {
-    logger.warn('Copy target has no wallet for user', { tgId, chain: target.chain });
-    return;
-  }
-  const maxPerTrade = target.maxPerTrade ?? 0.05;
   try {
-    if (change.dir === 'buy') {
-      const amount = target.useMaxPerTrade ? maxPerTrade : Math.min(maxPerTrade, maxPerTrade);
-      await buy(tgId, target.chain, change.token, String(amount));
-      logger.info('Copy BUY', { tgId, chain: target.chain, token: change.token, amount });
+    if (event.dir === 'buy') {
+      const amount = String(target.maxPerTrade ?? 0.05);
+      await buy(tgId, target.chain, event.token, amount);
+      logger.info('Copy BUY', { tgId, chain: target.chain, token: event.token, amount });
     } else {
-      await sell(tgId, target.chain, change.token, 'all');
-      logger.info('Copy SELL', { tgId, chain: target.chain, token: change.token });
+      await sell(tgId, target.chain, event.token, 'all');
+      logger.info('Copy SELL', { tgId, chain: target.chain, token: event.token });
     }
   } catch (err) {
-    logger.error('Copy trade failed', { tgId, chain: target.chain, token: change.token, error: err.message });
+    logger.error('Copy trade failed', { tgId, chain: target.chain, token: event.token, error: err.message });
+  }
+}
+
+async function pollTarget(target) {
+  const key = canonical(target);
+  try {
+    if (target.chain === 'solana') {
+      const prev = snapshots.get(key);
+      const current = await solanaSnapshot(target.chain, target.address);
+      snapshots.set(key, current);
+      if (!prev) return;
+      const tokens = new Set([...Object.keys(prev), ...Object.keys(current)]);
+      for (const token of tokens) {
+        const before = BigInt(prev[token] || 0);
+        const now = BigInt(current[token] || 0);
+        if (now > before) await processEvent(target, { token, dir: 'buy' });
+        else if (now < before) await processEvent(target, { token, dir: 'sell' });
+      }
+    } else {
+      const events = await evmEvents(target.chain, target.address);
+      for (const event of events) {
+        await processEvent(target, event);
+      }
+    }
+  } catch (err) {
+    logger.error('Copytrader poll failed', { target: key, error: err.message });
   }
 }
 
@@ -67,21 +113,7 @@ export async function startCopytrader() {
     const state = getCopytradeState();
     if (!state.enabled || !state.targets?.length) return;
     for (const target of state.targets) {
-      const key = canonical(target);
-      try {
-        const prev = snapshots.get(key);
-        if (prev) {
-          const { current, changes } = await diff(target.chain, target.address, prev);
-          snapshots.set(key, current);
-          for (const change of changes) {
-            await handleChange(target, change);
-          }
-        } else {
-          snapshots.set(key, await snapshot(target.chain, target.address));
-        }
-      } catch (err) {
-        logger.error('Copytrader poll failed', { target: key, error: err.message });
-      }
+      await pollTarget(target);
     }
   };
 
@@ -101,13 +133,15 @@ export function addTarget(tgId, chain, address, opts = {}) {
     tgId,
     chain,
     address,
-    label: opts.label || address.slice(0, 6) + '...' + address.slice(-4),
+    label: opts.label || `${address.slice(0, 6)}...${address.slice(-4)}`,
     maxPerTrade: opts.maxPerTrade ?? 0.05,
   };
   state.targets.push(target);
   state.enabled = true;
   setCopytrade(state);
-  snapshots.delete(canonical(target));
+  const key = canonical(target);
+  snapshots.delete(key);
+  evmCursors.delete(key);
   return target;
 }
 
@@ -127,3 +161,11 @@ export function listTargets() {
   return getCopytradeState().targets || [];
 }
 
+export function setTargetSize(id, nativeAmount) {
+  const state = getCopytradeState();
+  const t = (state.targets || []).find((x) => x.id === id);
+  if (!t) throw new Error('Target not found');
+  t.maxPerTrade = nativeAmount;
+  setCopytrade(state);
+  return t;
+}

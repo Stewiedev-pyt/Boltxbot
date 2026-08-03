@@ -16,6 +16,9 @@ export const config = {
 
   logLevel: process.env.LOG_LEVEL || 'info',
 
+  // Percentage of each trade collected as service fee (tracked in a ledger).
+  feePercent: num('FEE_PERCENT', 0.9),
+
   chains: {
     solana: {
       name: 'solana',
@@ -40,6 +43,17 @@ export const config = {
       baseToken: process.env.BNB_BASE_TOKEN || '0x55d398326f99059fF775485246999027B3197955',
       native: 'BNB',
     },
+    robinhood: {
+      name: 'robinhood',
+      rpc: process.env.ROBINHOOD_RPC || 'https://rpc.mainnet.chain.robinhood.com',
+      // DEX router addresses on Robinhood Chain are not officially published yet.
+      // Leave empty: wallets/balances/withdraw work, swaps are disabled until
+      // a verified router is set (see .env.example).
+      router: process.env.ROBINHOOD_ROUTER || '',
+      wrapped: process.env.ROBINHOOD_WRAPPED || '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
+      baseToken: process.env.ROBINHOOD_BASE_TOKEN || '',
+      native: 'ETH',
+    },
   },
 };
 
@@ -48,4 +62,5 @@ export const CHAIN_LABELS = {
   solana: 'Solana',
   ethereum: 'Ethereum',
   bnb: 'BNB Chain',
+  robinhood: 'Robinhood',
 };

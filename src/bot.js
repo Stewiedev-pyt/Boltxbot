@@ -2,6 +2,7 @@ import { Telegraf } from 'telegraf';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { registerCommands, registerCallbacks } from './commands.js';
+import { wizardMiddleware, hasWizard, clearWizard } from './wizard.js';
 import { listSignalSources, parseSignal, isSignalChat } from './services/signals.js';
 import { buy, sell, getSlippage } from './trading.js';
 import { getAdapter } from './chains/index.js';
@@ -25,6 +26,13 @@ export function createBot() {
 
   registerCommands(bot);
   registerCallbacks(bot);
+
+  bot.use(wizardMiddleware());
+
+  bot.command('cancel', (ctx) => {
+    clearWizard(ctx.from.id);
+    ctx.reply('Cancelled.');
+  });
 
   bot.on('message', async (ctx) => {
     if (!isSignalChat(ctx.chat.id)) return;

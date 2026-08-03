@@ -5,6 +5,7 @@ const adapters = {
   solana: makeSolanaAdapter(),
   ethereum: makeEvmAdapter('ethereum'),
   bnb: makeEvmAdapter('bnb'),
+  robinhood: makeEvmAdapter('robinhood'),
 };
 
 export function getAdapter(chainId) {

@@ -8,6 +8,7 @@ const ERC20_ABI = [
   'function symbol() view returns (string)',
   'function approve(address,uint256) returns (bool)',
   'function allowance(address,address) view returns (uint256)',
+  'function transfer(address,uint256) returns (bool)',
 ];
 
 const ROUTER_ABI = [
@@ -18,18 +19,26 @@ const ROUTER_ABI = [
   'function swapExactTokensForETHSupportingFeeOnTransferTokens(uint256,uint256,address[],address,uint256)',
 ];
 
-const NATIVE_ALIASES = new Set(['native', 'eth', 'bnb', 'bsc', 'weth', 'wbnb', 'wrap', 'wrapped']);
+const NATIVE_ALIASES = new Set(['native', 'eth', 'bnb', 'bsc', 'weth', 'wbnb', 'wrap', 'wrapped', 'rbn']);
 
 const INFO_CACHE = new Map();
 
 export function makeEvmAdapter(chainId) {
   const cfg = config.chains[chainId];
   const provider = new JsonRpcProvider(cfg.rpc, undefined, { staticNetwork: true });
-  const router = new Contract(cfg.router, ROUTER_ABI, provider);
+
+  function routerContract(signerOrProvider) {
+    if (!cfg.router) {
+      throw new Error(
+        `Swaps are not configured on ${chainId}. Set ${chainId.toUpperCase()}_ROUTER in .env with a verified DEX router.`
+      );
+    }
+    return new Contract(cfg.router, ROUTER_ABI, signerOrProvider);
+  }
 
   function normalizeAddress(input) {
     const v = String(input || '').trim();
-    if (NATIVE_ALIASES.has(v.toLowerCase()) || v.toLowerCase() === 'native') return cfg.wrapped;
+    if (NATIVE_ALIASES.has(v.toLowerCase())) return cfg.wrapped;
     if (/^(0x)?[0-9a-fA-F]{40}$/.test(v)) {
       const cleaned = v.startsWith('0x') ? v : `0x${v}`;
       return cleaned.toLowerCase();
@@ -76,10 +85,9 @@ export function makeEvmAdapter(chainId) {
 
   async function getBalances(wallet) {
     const nativeRaw = await getNativeBalance(wallet);
-    const balances = [
+    return [
       { token: cfg.wrapped, symbol: cfg.native, raw: nativeRaw, human: formatUnits(nativeRaw, 18), decimals: 18 },
     ];
-    return balances;
   }
 
   function buildPath(input, output) {
@@ -87,6 +95,7 @@ export function makeEvmAdapter(chainId) {
   }
 
   async function getQuote({ input, output, amountInRaw, amountOutHuman, slippagePercent }) {
+    const router = routerContract(provider);
     const inAddr = normalizeAddress(input);
     const outAddr = normalizeAddress(output);
     const path = buildPath(input, output);
@@ -131,6 +140,14 @@ export function makeEvmAdapter(chainId) {
     };
   }
 
+  /* Price of a token expressed in native currency per token. */
+  async function getPrice(token) {
+    const addr = normalizeAddress(token);
+    const info = await getTokenInfo(addr);
+    const q = await getQuote({ input: addr, output: cfg.wrapped, amountInRaw: (10n ** BigInt(info.decimals)).toString() });
+    return Number(q.amountOutRaw) / 1e18;
+  }
+
   async function ensureApproved(signer, tokenAddr, amountRaw) {
     const tok = new Contract(tokenAddr, ERC20_ABI, signer);
     const allowance = await tok.allowance(signer.address, cfg.router);
@@ -141,6 +158,7 @@ export function makeEvmAdapter(chainId) {
   }
 
   async function executeSwap({ wallet, quote, slippagePercent }) {
+    const router = routerContract(provider);
     const signer = new Wallet(wallet.privateKey, provider);
     const to = wallet.address;
     const slippageBps = Math.round((slippagePercent || quote.slippageBps / 100) * 100);
@@ -188,10 +206,46 @@ export function makeEvmAdapter(chainId) {
     return { txid: receipt.hash, receipt };
   }
 
+  async function withdrawNative(wallet, to, amountRaw) {
+    const signer = new Wallet(wallet.privateKey, provider);
+    const tx = await signer.sendTransaction({ to, value: BigInt(amountRaw) });
+    const receipt = await tx.wait();
+    logger.info('EVM native withdraw confirmed', { chain: chainId, to, txid: receipt.hash });
+    return { txid: receipt.hash };
+  }
+
+  async function withdrawToken(wallet, to, token, amountRaw) {
+    const addr = normalizeAddress(token);
+    if (addr === cfg.wrapped) return withdrawNative(wallet, to, amountRaw);
+    const signer = new Wallet(wallet.privateKey, provider);
+    const tok = new Contract(addr, ERC20_ABI, signer);
+    const tx = await tok.transfer(to, BigInt(amountRaw));
+    const receipt = await tx.wait();
+    logger.info('EVM token withdraw confirmed', { chain: chainId, to, token: addr, txid: receipt.hash });
+    return { txid: receipt.hash };
+  }
+
+  /* Honeypot heuristic: can the token be sold back? Reverts/zero => suspicious. */
+  async function checkSellable(token) {
+    if (!cfg.router) return null;
+    const addr = normalizeAddress(token);
+    try {
+      const router = routerContract(provider);
+      const info = await getTokenInfo(addr);
+      const qty = 10n ** BigInt(info.decimals);
+      const out = await router.getAmountsOut(qty, [addr, cfg.wrapped]);
+      const v = BigInt(out[out.length - 1]);
+      return v > 0n;
+    } catch {
+      return false;
+    }
+  }
+
   return {
     chainId,
     nativeSymbol: cfg.native,
     nativeDecimals: 18,
+    provider,
     normalizeAddress,
     isValidAddress,
     getTokenInfo,
@@ -199,7 +253,11 @@ export function makeEvmAdapter(chainId) {
     getTokenBalance,
     getBalances,
     getQuote,
+    getPrice,
     executeSwap,
+    withdrawNative,
+    withdrawToken,
+    checkSellable,
     needsApprove: true,
   };
 }
