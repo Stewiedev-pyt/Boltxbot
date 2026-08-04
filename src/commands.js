@@ -311,8 +311,8 @@ export function registerCommands(bot) {
       if (!extra) {
         return ctx.reply(
           `Usage: /wallet import <chain> <secret>\n` +
-            `Solana: base58 secret key\n` +
-            `Ethereum/BNB: 0x private key`
+            `Solana: base58 secret key or 12/24-word recovery phrase\n` +
+            `Ethereum/BNB: 0x private key or 12/24-word recovery phrase`
         );
       }
       try {
@@ -1055,8 +1055,8 @@ export function registerCallbacks(bot) {
             `\u{1F4E5} Import into ${CHAIN_LABELS[c]}\n\n` +
               `Send your secret in a private message:\n\n` +
               `/wallet import ${c} <secret>\n\n` +
-              `Solana: base58 secret key\n` +
-              `Ethereum/BNB: 0x private key`
+              `Solana: base58 secret key or 12/24-word recovery phrase\n` +
+              `Ethereum/BNB: 0x private key or 12/24-word recovery phrase`
           );
         }
       }

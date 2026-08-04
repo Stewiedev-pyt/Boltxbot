@@ -1,6 +1,8 @@
 import bs58 from 'bs58';
 import { Keypair } from '@solana/web3.js';
-import { Wallet as EvmWallet } from 'ethers';
+import { mnemonicToSeedSync, validateMnemonic } from 'bip39';
+import { derivePath } from 'ed25519-hd-key';
+import { Wallet as EvmWallet, HDNodeWallet } from 'ethers';
 import { getAdapter } from './chains/index.js';
 import {
   getOrCreateUser,
@@ -51,6 +53,30 @@ function importEvmSecret(input) {
   return { address: w.address, secretB64: Buffer.from(w.privateKey.slice(2), 'hex').toString('base64') };
 }
 
+/* Phantom-compatible Solana recovery phrase (SLIP-0010, m/44'/501'/0'/0'). */
+function importSolanaMnemonic(input) {
+  const phrase = input.trim().toLowerCase();
+  if (!validateMnemonic(phrase)) throw new Error('Invalid Solana recovery phrase (bad checksum)');
+  const seed = mnemonicToSeedSync(phrase);
+  const { key } = derivePath("m/44'/501'/0'/0'", seed.toString('hex'));
+  const kp = Keypair.fromSeed(key.slice(0, 32));
+  return { address: kp.publicKey.toBase58(), secretB64: Buffer.from(kp.secretKey).toString('base64') };
+}
+
+/* MetaMask-compatible EVM recovery phrase (default path m/44'/60'/0'/0/0). */
+function importEvmMnemonic(input) {
+  const phrase = input.trim().toLowerCase();
+  const wallet = HDNodeWallet.fromPhrase(phrase);
+  return {
+    address: wallet.address,
+    secretB64: Buffer.from(wallet.privateKey.slice(2), 'hex').toString('base64'),
+  };
+}
+
+function looksLikePhrase(input) {
+  return typeof input === 'string' && validateMnemonic(input.trim().toLowerCase());
+}
+
 export function createWallet(chainId) {
   const adapter = getAdapter(chainId);
   if (chainId === 'solana') return newSolanaWallet();
@@ -59,9 +85,15 @@ export function createWallet(chainId) {
 }
 
 export function importWallet(chainId, secret) {
-  if (chainId === 'solana') return importSolanaSecret(secret);
+  if (chainId === 'solana') {
+    if (looksLikePhrase(secret)) return importSolanaMnemonic(secret);
+    return importSolanaSecret(secret);
+  }
   const adapter = getAdapter(chainId);
-  if (adapter.needsApprove) return importEvmSecret(secret);
+  if (adapter.needsApprove) {
+    if (looksLikePhrase(secret)) return importEvmMnemonic(secret);
+    return importEvmSecret(secret);
+  }
   throw new Error(`No wallet importer for ${chainId}`);
 }
 
