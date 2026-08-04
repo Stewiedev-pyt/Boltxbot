@@ -13,6 +13,7 @@ const EMPTY_DB = {
   sniper: {},
   signals: {},
   limits: {},
+  dca: {},
 };
 
 let db = null;
@@ -103,6 +104,7 @@ function ensureUser(tgId) {
       trades: [],
       positions: {},
       feesOwed: {},
+      tpSl: { enabled: false, tpPct: 20, slPct: 10 },
     };
   }
   return db.users[id];
@@ -160,6 +162,15 @@ export function setActiveWallet(tgId, chainId, id) {
   u.wallets[chainId].active = id;
   save();
   return u.wallets[chainId].items[id];
+}
+
+export function updateWalletLabel(tgId, chainId, id, label) {
+  const u = ensureUser(tgId);
+  const w = u.wallets[chainId]?.items?.[id];
+  if (!w) throw new Error('Wallet not found');
+  w.label = String(label).slice(0, 40);
+  save();
+  return w;
 }
 
 /* ---------- trades / positions / fees ---------- */
@@ -249,6 +260,19 @@ export function getLimitsState() {
 
 export function setLimits(state) {
   db.limits = state;
+  save();
+}
+
+/* ---------- DCA ---------- */
+
+export function getDcaState() {
+  if (!db.dca) db.dca = { plans: [] };
+  if (!Array.isArray(db.dca.plans)) db.dca.plans = [];
+  return db.dca;
+}
+
+export function setDca(state) {
+  db.dca = state;
   save();
 }
 

@@ -3,6 +3,7 @@ import { createBot } from './bot.js';
 import { startCopytrader } from './services/copytrader.js';
 import { startSniper } from './services/sniper.js';
 import { startLimitEngine } from './services/limits.js';
+import { startDca } from './services/dca.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
@@ -40,6 +41,7 @@ async function main() {
   startCopytrader().catch((err) => logger.error('Copytrader failed to start', { error: err.message }));
   startSniper().catch((err) => logger.error('Sniper failed to start', { error: err.message }));
   startLimitEngine().catch((err) => logger.error('Limit engine failed to start', { error: err.message }));
+  startDca().catch((err) => logger.error('DCA engine failed to start', { error: err.message }));
 
   logger.info('Bot launched', { chains: Object.keys(config.chains) });
 

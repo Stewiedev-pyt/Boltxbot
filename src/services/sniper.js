@@ -8,12 +8,35 @@ const PROFILES_URL = 'https://api.dexscreener.com/token-profiles/latest/v1';
 
 let seen = new Set();
 const seenCap = 2000;
+const safetyCache = new Map();
 
 function keepSeen(tokens) {
   seen.add(tokens);
   if (seen.size > seenCap) {
     seen = new Set([...seen].slice(-seenCap));
   }
+}
+
+/* Anti-rug guard: reject tokens that can be minted freely or cannot be sold back.
+   Results are cached per token to keep the poll loop fast. */
+async function isSafeToken(chainId, tokenAddress) {
+  const key = `${chainId}:${tokenAddress.toLowerCase()}`;
+  if (safetyCache.has(key)) return safetyCache.get(key);
+  let safe = true;
+  try {
+    const adapter = getAdapter(chainId);
+    if (chainId === 'solana') {
+      const revoked = await adapter.isMintAuthorityRevoked(tokenAddress);
+      if (revoked === false) safe = false;
+    } else {
+      const sellable = await adapter.checkSellable(tokenAddress);
+      if (sellable === false) safe = false;
+    }
+  } catch {
+    // on-chain check failed -> allow through; liquidity/other checks still apply
+  }
+  safetyCache.set(key, safe);
+  return safe;
 }
 
 async function tokenLiquidity(chainId, tokenAddress) {
@@ -56,6 +79,13 @@ async function pollOnce() {
       try {
         const liq = await tokenLiquidity(user.chain, tokenAddress);
         if (liq < (user.minLiquidity ?? 5000)) continue;
+        if (user.antiRug !== false) {
+          const safe = await isSafeToken(user.chain, tokenAddress);
+          if (!safe) {
+            logger.info('Sniper skipped unsafe token', { tgId: user.tgId, chain: user.chain, token: tokenAddress });
+            continue;
+          }
+        }
         await buy(String(user.tgId), user.chain, tokenAddress, String(user.amount ?? 0.01));
         logger.info('Sniper BUY', { tgId: user.tgId, chain: user.chain, token: tokenAddress, liq });
       } catch (err) {

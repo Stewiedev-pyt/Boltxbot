@@ -135,6 +135,13 @@ export async function buy(tgId, chainId, token, amountHuman) {
     wallet: signerCtx.stored.address,
   });
 
+  try {
+    const { maybeOpenTpSl } = await import('./services/tpsl.js');
+    await maybeOpenTpSl(tgId, chainId, outToken, priceHuman, qtyHuman);
+  } catch {
+    // auto TP/SL is best-effort; never fail a completed buy
+  }
+
   logger.info('Buy executed', { tgId, chainId, token, amountHuman, txid: result.txid });
   return { ...result, quote, amountOutHuman: qtyHuman };
 }

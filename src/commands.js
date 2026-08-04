@@ -7,6 +7,7 @@ import {
   getTrades,
   getFees,
   getPositions,
+  updateWalletLabel,
 } from './db/store.js';
 import {
   createWallet,
@@ -15,6 +16,7 @@ import {
   switchWallet,
   listWallets,
   getSigner,
+  exportWallet,
 } from './wallet.js';
 import { getAdapter } from './chains/index.js';
 import { buy, sell, getQuoteForUser, getSlippage, withdraw, getPrice } from './trading.js';
@@ -22,7 +24,9 @@ import { addTarget, removeTarget, listTargets, setTargetSize } from './services/
 import { setSniperUser, getSniperUser, setSniperEnabled } from './services/sniper.js';
 import { addSignalSource, removeSignalSource, listSignalSources } from './services/signals.js';
 import { listLimitOrders, cancelLimitOrder } from './services/limits.js';
-import { scanToken, formatScan } from './services/scanner.js';
+import { addDcaPlan, cancelDcaPlan, listDcaPlans } from './services/dca.js';
+import { getTpSlSettings, setTpSlSettings } from './services/tpsl.js';
+import { scanToken, formatScan, getUsdPrice } from './services/scanner.js';
 import { startWizard } from './wizard.js';
 import { logger } from './logger.js';
 
@@ -93,10 +97,14 @@ function mainMenu() {
       Markup.button.callback('\u{1F4C1} History', 'menu:history'),
     ],
     [
+      Markup.button.callback('\u{1F4C9} TP/SL', 'menu:tpsl'),
+      Markup.button.callback('\u{1F4B0} DCA', 'menu:dca'),
+      Markup.button.callback('\u{1F4B0} Fees', 'menu:fee'),
+    ],
+    [
       Markup.button.callback('\u{1F3AF} Sniper', 'menu:sniper'),
       Markup.button.callback('\u{1F501} Copy-trade', 'menu:copytrade'),
       Markup.button.callback('\u{1F4E1} Signals', 'menu:signals'),
-      Markup.button.callback('\u{1F4B0} Fees', 'menu:fee'),
     ],
   ]);
 }
@@ -137,11 +145,23 @@ async function buildPortfolio(id) {
       const adapter = getAdapter(c);
       const balances = await adapter.getBalances(signerCtx.signer);
       const native = balances.find((b) => b.token === adapter.normalizeAddress('native'));
-      lines.push(`${CHAIN_LABELS[c]} (\`${fmtAddr(signerCtx.stored.address)}\`):`);
-      lines.push(`  ${native?.human || '0'} ${adapter.nativeSymbol}`);
-      for (const b of balances.filter((b) => b !== native)) {
-        lines.push(`  ${b.human} ${b.symbol} (\`${fmtAddr(b.token)}\`)`);
+      const nativeUsd = await getUsdPrice(c, adapter.normalizeAddress('native'));
+      const linesChain = [`${CHAIN_LABELS[c]} (\`${fmtAddr(signerCtx.stored.address)}\`):`];
+      if (native) {
+        const usd = nativeUsd != null ? `  (${fmtUsd(Number(native.human) * nativeUsd)})` : '';
+        linesChain.push(`  ${native.human} ${adapter.nativeSymbol}${usd}`);
       }
+      for (const b of balances.filter((b) => b !== native)) {
+        let usd = '';
+        try {
+          const p = await getUsdPrice(c, b.token);
+          if (p != null) usd = `  (${fmtUsd(Number(b.human) * p)})`;
+        } catch {
+          // skip
+        }
+        linesChain.push(`  ${b.human} ${b.symbol} (\`${fmtAddr(b.token)}\`)${usd}`);
+      }
+      lines.push(...linesChain);
     } catch (err) {
       lines.push(`${CHAIN_LABELS[c]}: error (${err.message})`);
     }
@@ -219,6 +239,9 @@ export function registerCommands(bot) {
         `/withdraw <token|native> <address> <amount|all|%> [chain]\n` +
         `/limit buy|sell <token> <price> <amount> [chain] \u2014 limit/TP/SL orders\n` +
         `/limit list | /limit cancel <id>\n` +
+        `/tpsl <tp%> <sl%> \u2014 auto TP/SL on every buy\n` +
+        `/dca <token> <amount> <rounds> <intervalMin> [chain] \u2014 dollar-cost averaging\n` +
+        `/dca list | /dca cancel <id>\n` +
         `/trending [chain] \u2014 trending tokens\n` +
         `/history \u2014 recent trades\n` +
         `/fees \u2014 outstanding service fees\n` +
@@ -259,7 +282,7 @@ export function registerCommands(bot) {
         }
         for (const w of wallets) {
           const marker = w.id === activeId ? '\u2705' : '\u{1F4E4}';
-          lines.push(`${marker} ${CHAIN_LABELS[c]} ${w.id}: \`${w.address}\``);
+          lines.push(`${marker} ${CHAIN_LABELS[c]} ${w.id}${w.label ? ` (${w.label})` : ''}: \`${w.address}\``);
         }
       }
       return ctx.reply(lines.join('\n'), { parse_mode: 'Markdown', ...chainMenu() });
@@ -305,9 +328,10 @@ export function registerCommands(bot) {
     }
 
     if (action === 'switch') {
-      const id = chainArg; // /wallet switch <chain> <walletId>  OR /wallet switch <walletId>
+      const wid = parts[3];
+      if (!wid) return ctx.reply('Usage: /wallet switch <chain> <walletId>');
       try {
-        const w = switchWallet(ctx.from.id, chainId, id);
+        const w = switchWallet(ctx.from.id, chainId, wid);
         await ctx.reply(`\u2705 Active ${CHAIN_LABELS[chainId]} wallet: \`${w.address}\``, {
           parse_mode: 'Markdown',
         });
@@ -317,8 +341,42 @@ export function registerCommands(bot) {
       return;
     }
 
+    if (action === 'export') {
+      const wid = parts[3] || null;
+      if (chainArg && !CHAIN_IDS.includes(chainArg)) {
+        return ctx.reply('Usage: /wallet export <chain> [walletId]');
+      }
+      try {
+        const { wallet: w, secret } = exportWallet(ctx.from.id, chainId, wid || null);
+        await ctx.reply(
+          `\u{1F512} ${CHAIN_LABELS[chainId]} wallet ${w.id} ${w.label ? `\u2014 ${w.label}` : ''}\n` +
+            `Address: \`${w.address}\`\nSecret:\n\`\`\`${secret}\`\`\`\n\n` +
+            `Never share this secret with anyone.`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (err) {
+        await ctx.reply(`\u274C ${err.message}`);
+      }
+      return;
+    }
+
+    if (action === 'rename') {
+      const wid = parts[3];
+      const label = parts.slice(4).join(' ').trim();
+      if (!wid || !label) return ctx.reply('Usage: /wallet rename <chain> <walletId> <label>');
+      try {
+        const w = updateWalletLabel(ctx.from.id, chainId, wid, label);
+        await ctx.reply(`\u2705 Wallet ${w.id} renamed to \u201C${w.label}\u201D`);
+      } catch (err) {
+        await ctx.reply(`\u274C ${err.message}`);
+      }
+      return;
+    }
+
     await ctx.reply(
-      'Usage:\n/wallet create [chain]\n/wallet import <chain> <secret>\n/wallet show [chain]\n/wallet switch <chain> <walletId>'
+      'Usage:\n/wallet create [chain]\n/wallet import <chain> <secret>\n' +
+        '/wallet show [chain]\n/wallet switch <chain> <walletId>\n' +
+        '/wallet export <chain> [walletId]\n/wallet rename <chain> <walletId> <label>'
     );
   });
 
@@ -518,6 +576,89 @@ export function registerCommands(bot) {
 
     return ctx.reply(
       'Usage:\n/limit buy|sell <token> <price> <amount> [chain]\n/limit list\n/limit cancel <id>'
+    );
+  });
+
+  /* ---------------- TP/SL ---------------- */
+
+  bot.command('tpsl', (ctx) => {
+    const parts = ctx.message.text.split(/\s+/).slice(1);
+    const cmd = (parts[0] || '').toLowerCase();
+    const s = getTpSlSettings(ctx.from.id);
+
+    if (cmd === 'on') {
+      setTpSlSettings(ctx.from.id, { enabled: true });
+      return ctx.reply(
+        `\u2705 Auto TP/SL ON: every buy opens a limit sell at TP ${s.tpPct}% and SL ${s.slPct}%.`
+      );
+    }
+    if (cmd === 'off') {
+      setTpSlSettings(ctx.from.id, { enabled: false });
+      return ctx.reply('Auto TP/SL OFF.');
+    }
+    const tp = parseFloat(parts[0]);
+    const sl = parseFloat(parts[1]);
+    if (Number.isFinite(tp) && Number.isFinite(sl) && tp > 0 && sl > 0) {
+      const next = setTpSlSettings(ctx.from.id, { tpPct: tp, slPct: sl, enabled: true });
+      return ctx.reply(
+        `\u2705 TP/SL set: TP +${next.tpPct}% / SL -${next.slPct}% and enabled.`
+      );
+    }
+    return ctx.reply(
+      `\u{1F4C9} Auto TP/SL\nStatus: ${s.enabled ? 'ON' : 'OFF'}\n` +
+        `Take profit: +${s.tpPct}%  Stop loss: -${s.slPct}%\n\n` +
+        `Usage:\n/tpsl <tp%> <sl%> \u2014 set levels and enable\n/tpsl on | /tpsl off`
+    );
+  });
+
+  /* ---------------- DCA ---------------- */
+
+  bot.command('dca', async (ctx) => {
+    const parts = ctx.message.text.split(/\s+/).slice(1);
+    const cmd = (parts[0] || '').toLowerCase();
+
+    if (cmd === 'list') {
+      const plans = listDcaPlans(ctx.from.id);
+      if (plans.length === 0) return ctx.reply('No active DCA plans.');
+      const lines = plans.map(
+        (p) =>
+          `${p.id} \u2022 ${p.roundsDone}/${p.totalRounds} rounds done\n` +
+          `  ${p.amountPerRound} ${getAdapter(p.chain).nativeSymbol} \u2192 \`${fmtAddr(p.token)}\` every ${Math.round(p.intervalMs / 60000)}m (${CHAIN_LABELS[p.chain]})`
+      );
+      return ctx.reply(`\u{1F4B0} DCA plans:\n\n${lines.join('\n\n')}`, { parse_mode: 'Markdown' });
+    }
+
+    if (cmd === 'cancel') {
+      const ok = cancelDcaPlan(ctx.from.id, parts[1]);
+      return ctx.reply(ok ? '\u2705 DCA plan cancelled' : '\u274C Plan not found');
+    }
+
+    if (parts.length >= 4) {
+      const chainId = resolveChain(ctx, parts[4]);
+      try {
+        const p = addDcaPlan(
+          ctx.from.id,
+          chainId,
+          parts[0],
+          parts[1],
+          parseInt(parts[2], 10),
+          parseFloat(parts[3]) * 60000
+        );
+        return ctx.reply(
+          `\u2705 DCA plan started\nID: \`${p.id}\`\n` +
+            `Token: \`${parts[0]}\`\nAmount: ${p.amountPerRound} ${getAdapter(chainId).nativeSymbol}/round\n` +
+            `Rounds: ${p.totalRounds} \u2022 every ${parts[3]}m (${CHAIN_LABELS[chainId]})`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (err) {
+        return ctx.reply(`\u274C ${err.message}`);
+      }
+    }
+
+    return ctx.reply(
+      'Usage:\n/dca <token> <amountPerRound> <rounds> <intervalMinutes> [chain]\n' +
+        '/dca list | /dca cancel <id>\n\n' +
+        'Buys the token on a fixed schedule. Interval must be >= 1 minute.'
     );
   });
 
@@ -834,6 +975,22 @@ export function registerCallbacks(bot) {
         if (param === 'sniper') return ctx.reply('Sniper: /sniper on | /sniper off | /sniper <amount> | /sniper minliq <usd>');
         if (param === 'copytrade') return ctx.reply('Copy-trade: /copytrade add <wallet> [chain]');
         if (param === 'signals') return ctx.reply('Signals: /signals add <chatId> [chain]');
+        if (param === 'tpsl') {
+          const s = getTpSlSettings(id);
+          return ctx.reply(
+            `\u{1F4C9} Auto TP/SL\nStatus: ${s.enabled ? 'ON' : 'OFF'}\n` +
+              `Take profit: +${s.tpPct}%  Stop loss: -${s.slPct}%\n\n` +
+              `/tpsl <tp%> <sl%> \u2014 set levels and enable\n/tpsl on | /tpsl off`
+          );
+        }
+        if (param === 'dca') {
+          return ctx.reply(
+            `\u{1F4B0} DCA (dollar-cost averaging)\n\n` +
+              `/dca <token> <amount> <rounds> <intervalMin> [chain]\n` +
+              `/dca list | /dca cancel <id>\n\n` +
+              `Buys the token on a fixed schedule. Interval >= 1 minute.`
+          );
+        }
         return ctx.editMessageText('\u{1F4CE} Main menu', mainMenu());
       }
 

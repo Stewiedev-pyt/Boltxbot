@@ -65,11 +65,12 @@ export function importWallet(chainId, secret) {
   throw new Error(`No wallet importer for ${chainId}`);
 }
 
-export function saveWallet(tgId, chainId, wallet) {
+export function saveWallet(tgId, chainId, wallet, label) {
   getOrCreateUser(tgId);
   const stored = {
     address: wallet.address,
     encKey: encryptSecret(wallet.secretB64),
+    ...(label ? { label: String(label).slice(0, 40) } : {}),
   };
   return addWallet(tgId, chainId, stored);
 }
@@ -97,4 +98,20 @@ export function getSigner(tgId, chainId) {
   const stored = getWallet(tgId, chainId);
   if (!stored) return null;
   return { stored, signer: toSigner(chainId, stored) };
+}
+
+/* Decrypt and return a wallet's secret in its human-readable form.
+   id may be omitted to export the active wallet. */
+export function exportWallet(tgId, chainId, id) {
+  const wallet = id ? getWallets(tgId, chainId).find((w) => w.id === id) : getWallet(tgId, chainId);
+  if (!wallet) throw new Error('Wallet not found');
+  const secretB64 = decryptSecret(wallet.encKey);
+  if (!secretB64) throw new Error('Could not decrypt wallet key');
+  let secret;
+  if (chainId === 'solana') {
+    secret = bs58.encode(Buffer.from(secretB64, 'base64'));
+  } else {
+    secret = `0x${Buffer.from(secretB64, 'base64').toString('hex')}`;
+  }
+  return { wallet, secret };
 }

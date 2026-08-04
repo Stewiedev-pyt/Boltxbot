@@ -2,10 +2,35 @@ import { getAdapter } from '../chains/index.js';
 
 const PAIRS_URL = 'https://api.dexscreener.com/latest/dex/tokens/';
 
+const PRICE_CACHE = new Map();
+const PRICE_TTL = 60_000;
+
 async function fetchJson(url, timeoutMs = 15000) {
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+/* Best-effort USD price for a token via DEXScreener (cached 60s). Returns null
+   if unknown. 'native' resolves to the wrapped token for EVM chains. */
+export async function getUsdPrice(chainId, token) {
+  const adapter = getAdapter(chainId);
+  const address = adapter.normalizeAddress(token);
+  const key = `${chainId}:${address.toLowerCase()}`;
+  const cached = PRICE_CACHE.get(key);
+  if (cached && Date.now() - cached.ts < PRICE_TTL) return cached.price;
+  try {
+    const { pairs } = await fetchJson(`${PAIRS_URL}${address}`);
+    const pair = pairs?.find(
+      (p) => p.chainId === chainId && p.priceUsd && Number(p.priceUsd) > 0
+    );
+    const price = pair ? Number(pair.priceUsd) : null;
+    PRICE_CACHE.set(key, { price, ts: Date.now() });
+    return price;
+  } catch {
+    PRICE_CACHE.set(key, { price: null, ts: Date.now() });
+    return null;
+  }
 }
 
 function usd(n) {
