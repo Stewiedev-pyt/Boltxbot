@@ -228,7 +228,14 @@ export function registerCommands(bot) {
     ctx.reply(
       `Welcome to the multi-chain trading bot \u{1F680}\n\n` +
         `DEX swaps on Solana (Jupiter), Ethereum (Uniswap), BNB Chain (PancakeSwap) and Robinhood Chain.\n\n` +
-        `Commands:\n` +
+        `\u{1F4CE} Use the buttons below to get started:`,
+      mainMenu()
+    )
+  );
+
+  bot.command('help', (ctx) =>
+    ctx.reply(
+      `Commands:\n` +
         `/wallet create|import|show|list|switch \u2014 manage wallets per chain\n` +
         `/buy <token> <amount> [chain] \u2014 swap native \u2192 token\n` +
         `/sell <token> [amount|%|all] [chain] \u2014 swap token \u2192 native\n` +
@@ -251,12 +258,9 @@ export function registerCommands(bot) {
         `/copytrade add|remove|size \u2014 follow wallets\n` +
         `/signals add|remove \u2014 execute trades from channel messages\n` +
         `/menu \u2014 button menu\n` +
-        `/help \u2014 this list\n\n` +
-        `Start with /wallet create to make wallets.`
+        `/help \u2014 this list`
     )
   );
-
-  bot.command('help', (ctx) => ctx.reply('Use /start to see the command list.'));
 
   bot.command('menu', (ctx) => ctx.reply('\u{1F4CE} Main menu', mainMenu()));
 
@@ -848,9 +852,9 @@ export function registerCallbacks(bot) {
     const chainId = resolveChain(ctx, param);
 
     try {
+      await ctx.answerCbQuery().catch(() => {});
       /* ---------- main menu ---------- */
       if (action === 'menu') {
-        await ctx.answerCbQuery();
         if (param === 'chain') return ctx.editMessageText('Switch chain:', chainSwitchMenu());
         if (param === 'buy') {
           startWizard(id, 'buy', user.defaultChain);
@@ -997,7 +1001,6 @@ export function registerCallbacks(bot) {
       /* ---------- chain switch / select ---------- */
       if (action === 'setchain') {
         setUserField(id, 'defaultChain', param);
-        await ctx.answerCbQuery(`Default chain -> ${CHAIN_LABELS[param]}`);
         return ctx.editMessageText(
           `\u2705 Default chain set to ${CHAIN_LABELS[param]}\n\nAll buy/sell/quote commands will now use ${CHAIN_LABELS[param]}.`,
           mainMenu()
@@ -1006,7 +1009,6 @@ export function registerCallbacks(bot) {
 
       if (action === 'chain') {
         setUserField(id, 'defaultChain', param);
-        await ctx.answerCbQuery(`${CHAIN_LABELS[param]} selected`);
         return ctx.editMessageText(
           `\u2705 Default chain set to ${CHAIN_LABELS[param]}\n\n` +
             `What do you want to do on ${CHAIN_LABELS[param]}?`,
@@ -1031,7 +1033,6 @@ export function registerCallbacks(bot) {
               lines.push(`${marker} ${CHAIN_LABELS[c]} ${w.id}: \`${w.address}\``);
             }
           }
-          await ctx.answerCbQuery();
           return ctx.editMessageText(lines.join('\n'), { parse_mode: 'Markdown', ...chainMenu() });
         }
 
@@ -1039,7 +1040,6 @@ export function registerCallbacks(bot) {
           const c = parts[2];
           const w = createWallet(c);
           saveWallet(id, c, w);
-          await ctx.answerCbQuery('Wallet created');
           return ctx.editMessageText(
             `\u{1F511} Created ${CHAIN_LABELS[c]} wallet\n` +
               `Address: \`${w.address}\`\n\n` +
@@ -1050,7 +1050,6 @@ export function registerCallbacks(bot) {
 
         if (param === 'import') {
           const c = parts[2];
-          await ctx.answerCbQuery();
           return ctx.editMessageText(
             `\u{1F4E5} Import into ${CHAIN_LABELS[c]}\n\n` +
               `Send your secret in a private message:\n\n` +
@@ -1065,7 +1064,6 @@ export function registerCallbacks(bot) {
         const c = parts[1];
         const wid = parts[2];
         const w = switchWallet(id, c, wid);
-        await ctx.answerCbQuery(`Active wallet -> ${w.address.slice(0, 6)}...`);
         return ctx.editMessageText(`\u2705 Active ${CHAIN_LABELS[c]} wallet: \`${w.address}\``, {
           parse_mode: 'Markdown',
           ...mainMenuReply(''),
@@ -1079,14 +1077,12 @@ export function registerCallbacks(bot) {
         const pct = parts[3] || '100';
         try {
           const r = await sell(id, c, token, `${pct}%`);
-          await ctx.answerCbQuery(`Sold ${pct}%`);
           return ctx.reply(
             `\u2705 Sold ${pct}% of \`${token}\` (${CHAIN_LABELS[c]}) for ~${r.quote.amountOutHuman} ${r.quote.outSymbol}\n` +
               `TX: \`${r.txid}\``,
             { parse_mode: 'Markdown' }
           );
         } catch (err) {
-          await ctx.answerCbQuery(`Error: ${err.message}`);
           return ctx.reply(`\u274C ${err.message}`);
         }
       }
@@ -1095,7 +1091,6 @@ export function registerCallbacks(bot) {
       if (action === 'limit') {
         if (param === 'buy' || param === 'sell') {
           startWizard(id, 'limit', user.defaultChain, { dir: param });
-          await ctx.answerCbQuery();
           return ctx.reply(`\u{23F3} Limit ${param.toUpperCase()} on ${CHAIN_LABELS[user.defaultChain]}\n\nSend the token contract address:`);
         }
         if (param === 'list') {
@@ -1105,13 +1100,11 @@ export function registerCallbacks(bot) {
             (o) =>
               `${o.dir.toUpperCase()} \`${fmtAddr(o.token)}\` @ ${o.targetPrice} (${CHAIN_LABELS[o.chain]}) amt ${o.amount} \u2022 id \`${o.id}\``
           );
-          await ctx.answerCbQuery();
           return ctx.reply(`\u{23F3} Active orders:\n${lines.join('\n')}`, { parse_mode: 'Markdown' });
         }
       }
     } catch (err) {
       logger.error('Callback failed', { data, error: err.message });
-      await ctx.answerCbQuery(`Error: ${err.message}`).catch(() => {});
       return ctx.reply(`\u274C ${err.message}`).catch(() => {});
     }
 
