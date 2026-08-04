@@ -34,7 +34,16 @@ export async function getUsdPrice(chainId, token) {
 }
 
 function usd(n) {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n || 0);
+  if (n === null || n === undefined) return 'n/a';
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(2)}K`;
+  return `$${Number(n).toFixed(4)}`;
+}
+
+function pct(n) {
+  if (n === null || n === undefined) return 'n/a';
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 }
 
 /* Returns a human-readable safety report for a token on a chain. */
@@ -45,11 +54,23 @@ export async function scanToken(chainId, token) {
   const report = {
     chainId,
     address,
+    name: null,
     symbol: info.symbol,
     decimals: info.decimals,
     price: null,
-    liquidityUsd: null,
+    priceChange1h: null,
+    priceChange6h: null,
     priceChange24h: null,
+    priceChange7d: null,
+    liquidityUsd: null,
+    volumeUsd24h: null,
+    fdv: null,
+    marketCap: null,
+    pairAgeHours: null,
+    dexId: null,
+    quoteSymbol: null,
+    pairAddress: null,
+    url: null,
     holders: null,
     mintAuthorityRevoked: null,
     sellable: null,
@@ -62,9 +83,25 @@ export async function scanToken(chainId, token) {
       (p) => p.chainId === chainId && p.dexId && p.liquidity && Number(p.liquidity.usd) > 0
     );
     if (pair) {
+      report.name = pair.baseToken?.name || null;
+      report.symbol = pair.baseToken?.symbol || info.symbol;
       report.price = pair.priceUsd ? Number(pair.priceUsd) : null;
+      const ch = pair.priceChange || {};
+      report.priceChange1h = ch.m5 != null ? Number(ch.m5) : ch.h1 != null ? Number(ch.h1) : null;
+      report.priceChange6h = ch.h6 != null ? Number(ch.h6) : null;
+      report.priceChange24h = ch.h24 != null ? Number(ch.h24) : null;
+      report.priceChange7d = ch.d1 != null ? Number(ch.d1) : null;
       report.liquidityUsd = Number(pair.liquidity.usd);
-      report.priceChange24h = pair.priceChange?.h24 != null ? Number(pair.priceChange.h24) : null;
+      report.volumeUsd24h = pair.volume ? Number(pair.volume.h24) : null;
+      report.fdv = pair.fdv != null ? Number(pair.fdv) : null;
+      report.marketCap = pair.marketCap != null ? Number(pair.marketCap) : null;
+      report.dexId = pair.dexId;
+      report.quoteSymbol = pair.quoteToken?.symbol || null;
+      report.pairAddress = pair.pairAddress || null;
+      report.url = pair.url || null;
+      if (pair.pairCreatedAt) {
+        report.pairAgeHours = (Date.now() - pair.pairCreatedAt) / 3600000;
+      }
       if (pair.info && Array.isArray(pair.info.holders)) {
         const total = pair.info.holders.reduce((s, h) => s + (h.percentage || 0), 0);
         report.holders = { top10: total, count: pair.info.holders.length };
@@ -102,14 +139,29 @@ export async function scanToken(chainId, token) {
 
 export function formatScan(report) {
   const lines = [
-    `\u{1F50D} Token scan: ${report.symbol}`,
-    `Chain: ${report.chainId}  Address: \`${report.address}\``,
+    `\u{1F50D} ${report.name || report.symbol} (${report.symbol})`,
+    `\u{1F3EC} ${report.chainId} \u2022 \`${report.address}\``,
   ];
-  lines.push(`Price: ${report.price ? usd(report.price) : 'n/a'}`);
-  lines.push(`Liquidity: ${report.liquidityUsd !== null ? usd(report.liquidityUsd) : 'n/a'}`);
-  if (report.priceChange24h !== null) {
-    const pct = report.priceChange24h;
-    lines.push(`24h: ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`);
+  lines.push(`Price: ${usd(report.price)}`);
+  const changes = [
+    `1h ${pct(report.priceChange1h)}`,
+    `6h ${pct(report.priceChange6h)}`,
+    `24h ${pct(report.priceChange24h)}`,
+    `7d ${pct(report.priceChange7d)}`,
+  ];
+  lines.push(`Change: ${changes.join('  ')}`);
+  lines.push(`Liquidity: ${usd(report.liquidityUsd)}`);
+  if (report.volumeUsd24h !== null && report.volumeUsd24h !== undefined) {
+    lines.push(`Volume 24h: ${usd(report.volumeUsd24h)}`);
+  }
+  if (report.fdv !== null && report.fdv !== undefined) {
+    lines.push(`FDV: ${usd(report.fdv)}${report.marketCap != null ? `  \u2022  MCap: ${usd(report.marketCap)}` : ''}`);
+  }
+  if (report.dexId) {
+    const age = report.pairAgeHours !== null && report.pairAgeHours !== undefined
+      ? ` \u2022 age ${report.pairAgeHours < 1 ? `${Math.round(report.pairAgeHours * 60)}m` : `${report.pairAgeHours.toFixed(1)}h`}`
+      : '';
+    lines.push(`DEX: ${report.dexId}${report.quoteSymbol ? `/${report.quoteSymbol}` : ''}${age}`);
   }
   if (report.holders) lines.push(`Top-10 holders: ${report.holders.top10.toFixed(1)}%`);
   if (report.mintAuthorityRevoked !== null) {
@@ -124,5 +176,40 @@ export function formatScan(report) {
   } else {
     lines.push('', '\u2705 No obvious red flags');
   }
+  if (report.url) lines.push('', report.url);
   return lines.join('\n');
+}
+
+/* Fast, best-effort one-line summary for a token (used when a CA is pasted
+   into the buy/sell/quote flows). Returns null if unknown. */
+export async function quickInfo(chainId, token) {
+  const adapter = getAdapter(chainId);
+  const address = adapter.normalizeAddress(token);
+  try {
+    const { pairs } = await fetchJson(`${PAIRS_URL}${address}`);
+    const pair = pairs?.find((p) => p.chainId === chainId && p.pairAddress && p.priceUsd);
+    if (!pair) return null;
+    return {
+      address,
+      name: pair.baseToken?.name || null,
+      symbol: pair.baseToken?.symbol || null,
+      price: pair.priceUsd ? Number(pair.priceUsd) : null,
+      priceChange24h: pair.priceChange?.h24 != null ? Number(pair.priceChange.h24) : null,
+      liquidity: pair.liquidity?.usd ? Number(pair.liquidity.usd) : null,
+      url: pair.url || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function formatQuick(info) {
+  if (!info) return null;
+  const parts = [];
+  if (info.name) parts.push(info.name);
+  if (info.symbol) parts.push(`(${info.symbol})`);
+  if (info.price !== null) parts.push(`\u2022 ${usd(info.price)}`);
+  if (info.priceChange24h !== null) parts.push(`24h ${pct(info.priceChange24h)}`);
+  if (info.liquidity !== null) parts.push(`Liq ${usd(info.liquidity)}`);
+  return parts.join(' ');
 }

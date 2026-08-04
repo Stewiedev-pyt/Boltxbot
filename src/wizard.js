@@ -1,5 +1,5 @@
 import { buy, sell, getQuoteForUser, getSlippage, withdraw } from './trading.js';
-import { scanToken, formatScan } from './services/scanner.js';
+import { scanToken, formatScan, quickInfo, formatQuick } from './services/scanner.js';
 import { addLimitOrder } from './services/limits.js';
 import { getAdapter } from './chains/index.js';
 import { CHAIN_LABELS } from './config.js';
@@ -23,12 +23,23 @@ function reply(ctx, text, opts = {}) {
   return ctx.reply(text, { parse_mode: 'Markdown', ...opts });
 }
 
+/* Best-effort one-line token summary shown when a CA is pasted. */
+async function tokenLine(chainId, token) {
+  try {
+    const info = await quickInfo(chainId, token);
+    return formatQuick(info);
+  } catch {
+    return null;
+  }
+}
+
 const STEPS = {
   buy: [
     async (ctx, s) => {
       s.data.token = ctx.message.text.trim();
       const adapter = getAdapter(s.chainId);
-      await reply(ctx, `How much ${adapter.nativeSymbol} to spend on \`${s.data.token}\`?`);
+      const line = await tokenLine(s.chainId, s.data.token);
+      await reply(ctx, `${line ? `\u{1F50D} ${line}\n\n` : ''}How much ${adapter.nativeSymbol} to spend on \`${s.data.token}\`?`);
     },
     async (ctx, s) => {
       const adapter = getAdapter(s.chainId);
@@ -44,7 +55,8 @@ const STEPS = {
   sell: [
     async (ctx, s) => {
       s.data.token = ctx.message.text.trim();
-      await reply(ctx, `Amount to sell (\`all\`, \`50%\`, or a number)?`);
+      const line = await tokenLine(s.chainId, s.data.token);
+      await reply(ctx, `${line ? `\u{1F50D} ${line}\n\n` : ''}Amount to sell (\`all\`, \`50%\`, or a number)?`);
     },
     async (ctx, s) => {
       const r = await sell(ctx.from.id, s.chainId, s.data.token, ctx.message.text.trim());
@@ -59,7 +71,8 @@ const STEPS = {
     async (ctx, s) => {
       s.data.token = ctx.message.text.trim();
       const adapter = getAdapter(s.chainId);
-      await reply(ctx, `Amount of ${adapter.nativeSymbol} to quote?`);
+      const line = await tokenLine(s.chainId, s.data.token);
+      await reply(ctx, `${line ? `\u{1F50D} ${line}\n\n` : ''}Amount of ${adapter.nativeSymbol} to quote?`);
     },
     async (ctx, s) => {
       const q = await getQuoteForUser(ctx.from.id, s.chainId, {
